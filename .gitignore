@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output — rebuilt by CI on every push
+dist/
+dev-dist/
+
+# Local overrides
+*.local
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

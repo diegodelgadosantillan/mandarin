@@ -1,0 +1,6 @@
+# Store everything with LF in the repository so Windows checkouts and the Linux
+# CI runner never disagree about line endings.
+* text=auto eol=lf
+
+# Binary — never touch these.
+*.png binary
