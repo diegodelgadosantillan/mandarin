@@ -1,6 +1,7 @@
 import './styles.css';
 import { registerSW } from 'virtual:pwa-register';
 import { requestPersistence } from './core/storage.ts';
+import { startSync } from './sync/service.ts';
 import { toast } from './ui/dom.ts';
 import { startApp } from './ui/app.ts';
 
@@ -20,3 +21,6 @@ window.addEventListener('unhandledrejection', (event) => {
 
 const mount = document.getElementById('app');
 if (mount) startApp(mount);
+
+// Cloud sync, if configured and signed in. Deferred and non-blocking.
+startSync();

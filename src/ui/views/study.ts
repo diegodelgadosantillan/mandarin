@@ -7,6 +7,7 @@ import { buildQueue } from '../../session/queue.ts';
 import { SessionRunner } from '../../session/runner.ts';
 import { loadSettings } from '../../settings.ts';
 import type { QueueItem } from '../../session/queue.ts';
+import { requestSync } from '../../sync/service.ts';
 import { clear, h, plural, toast } from '../dom.ts';
 import { formatInterval } from '../format.ts';
 
@@ -237,6 +238,7 @@ async function runSession(root: HTMLElement, choice: SessionChoice): Promise<voi
   async function exit(): Promise<void> {
     if (finished) return;
     finished = true;
+    requestSync(true); // upload the session now rather than after the debounce
     document.removeEventListener('keydown', onKeyDown);
     stopSpeech();
     view?.destroy?.();
@@ -245,6 +247,7 @@ async function runSession(root: HTMLElement, choice: SessionChoice): Promise<voi
 
   function showSummary(): void {
     finished = true;
+    requestSync(true);
     document.removeEventListener('keydown', onKeyDown);
     view?.destroy?.();
     clear(faceHost);

@@ -1,5 +1,6 @@
 import { clear, h } from './dom.ts';
 import { renderInstallHint } from './install-hint.ts';
+import { renderSyncDot } from './sync-dot.ts';
 import { renderDecks } from './views/decks.ts';
 import { renderDifficult } from './views/difficult.ts';
 import { renderImport } from './views/import.ts';
@@ -36,6 +37,7 @@ export function startApp(mount: HTMLElement): void {
         'div',
         { class: 'app-header__bar' },
         h('h1', { class: 'app-title' }, h('span', {}, '中文'), ' Estudio'),
+        renderSyncDot(),
         nav,
       ),
     ),

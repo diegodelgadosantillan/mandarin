@@ -1254,6 +1254,61 @@ input[type='range'] {
   }
 }
 
+.account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 420px;
+}
+
+/* ----------------------------------------------------------- sync dot ---- */
+/* A 12px dot, but inside a full-size tap target. */
+.sync-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--tap);
+  height: var(--tap);
+  flex-shrink: 0;
+}
+
+.sync-dot[hidden] {
+  display: none;
+}
+
+.sync-dot::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.sync-dot[data-state='idle']::after {
+  background: var(--ok);
+}
+
+.sync-dot[data-state='syncing']::after,
+.sync-dot[data-state='loading']::after {
+  background: var(--focus);
+  animation: sync-pulse 1s ease-in-out infinite alternate;
+}
+
+.sync-dot[data-state='offline']::after {
+  background: var(--warn);
+}
+
+.sync-dot[data-state='error']::after {
+  background: var(--danger);
+}
+
+@keyframes sync-pulse {
+  to {
+    opacity: 0.35;
+  }
+}
+
 /* ------------------------------------------------------- install hint ---- */
 .install-hint {
   max-width: 960px;

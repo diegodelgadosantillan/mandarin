@@ -53,6 +53,17 @@ export function newId(): string {
   return crypto.randomUUID();
 }
 
+let changeListener: (() => void) | null = null;
+
+/**
+ * Register the single listener told about every tracked local change (the
+ * sync service, which debounces it into an upload). A registration hook
+ * rather than an import keeps db/ free of any dependency on sync/.
+ */
+export function onLocalChange(listener: (() => void) | null): void {
+  changeListener = listener;
+}
+
 type Tracked = { updatedAt?: number; dirty?: 0 | 1 };
 
 /**
@@ -69,12 +80,14 @@ export function installTracking<T extends Tracked, K>(
     if (include && !include(obj)) return;
     obj.dirty = 1;
     if (mode === 'track' || obj.updatedAt === undefined) obj.updatedAt = nextStamp();
+    changeListener?.();
   });
 
   table.hook('updating', (_mods, _key, obj, trans) => {
     const mode = modeOf(trans);
     if (mode === 'raw') return undefined;
     if (include && !include(obj)) return undefined;
+    changeListener?.();
     if (mode === 'preserve') return { dirty: 1 };
     return { dirty: 1, updatedAt: nextStamp() };
   });

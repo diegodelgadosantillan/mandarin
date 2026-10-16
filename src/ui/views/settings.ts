@@ -10,6 +10,7 @@ import { DEFAULT_SETTINGS, loadSettings, saveSettings, type AppSettings } from '
 import { clear, h, toast } from '../dom.ts';
 import { saveFile } from '../save-file.ts';
 import { isPersisted } from '../../core/storage.ts';
+import { renderAccountSection } from './account.ts';
 
 interface NumberFieldSpec {
   key: keyof AppSettings;
@@ -311,6 +312,7 @@ export async function renderSettings(root: HTMLElement): Promise<void> {
         ),
       ),
     ),
+    renderAccountSection(),
     renderBackupSection(),
     h(
       'section',

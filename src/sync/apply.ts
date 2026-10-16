@@ -1,5 +1,5 @@
 import type { Table } from 'dexie';
-import { db } from '../db/db.ts';
+import { db, type MandarinDB } from '../db/db.ts';
 import { incomingWins, type SyncedKind } from './merge.ts';
 
 export interface MergeCount {
@@ -38,10 +38,10 @@ export async function mergeRows<T extends { updatedAt?: number; reps?: number },
 }
 
 /** Recompute the denormalised card count on every deck after a bulk merge. */
-export async function recountDecks(): Promise<void> {
-  const decks = await db.decks.toArray();
+export async function recountDecks(database: MandarinDB = db): Promise<void> {
+  const decks = await database.decks.toArray();
   for (const deck of decks) {
-    const cardCount = await db.cards.where('[deckId+deleted]').equals([deck.id, 0]).count();
-    if (cardCount !== deck.cardCount) await db.decks.update(deck.id, { cardCount });
+    const cardCount = await database.cards.where('[deckId+deleted]').equals([deck.id, 0]).count();
+    if (cardCount !== deck.cardCount) await database.decks.update(deck.id, { cardCount });
   }
 }
