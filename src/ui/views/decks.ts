@@ -14,7 +14,7 @@ export async function renderDecks(root: HTMLElement): Promise<void> {
 
   async function refresh(): Promise<void> {
     clear(list);
-    const decks = await db.decks.orderBy('name').toArray();
+    const decks = (await db.decks.orderBy('name').toArray()).filter((d) => d.deleted !== 1);
 
     if (decks.length === 0) {
       list.append(
@@ -66,7 +66,7 @@ async function renderDeckCard(deck: Deck, onChange: () => Promise<void>): Promis
           type: 'button',
           onclick: async () => {
             const ok = confirm(
-              `¿Eliminar el mazo «${deck.name}» y sus ${deck.cardCount} tarjetas?\n\nSe borrará también su programación. El historial de repasos se conserva para las estadísticas.`,
+              `¿Eliminar el mazo «${deck.name}» y sus ${deck.cardCount} tarjetas?\n\nDejarán de aparecer en el estudio y en todos tus dispositivos. Su progreso se guarda: si vuelves a importar el mismo archivo, el mazo regresa con su historial.`,
             );
             if (!ok) return;
             const removed = await deleteDeck(deck.id);

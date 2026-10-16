@@ -27,7 +27,10 @@ async function renderSetup(root: HTMLElement): Promise<void> {
   clear(root);
 
   const [decks, settings, saved] = await Promise.all([
-    db.decks.orderBy('name').toArray(),
+    db.decks
+      .orderBy('name')
+      .toArray()
+      .then((all) => all.filter((d) => d.deleted !== 1)),
     loadSettings(),
     getSetting<SessionChoice | null>(CHOICE_KEY, null),
   ]);

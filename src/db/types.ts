@@ -36,7 +36,18 @@ export const GRADE_LABEL: Record<Grade, string> = {
 
 export type HskLevel = 1 | 2 | 3;
 
-export interface Deck {
+/**
+ * Bookkeeping carried by every synced row. Filled in automatically by the
+ * table hooks in db/tracking.ts — application code never sets these by hand.
+ */
+export interface SyncFields {
+  /** Monotonic last-change stamp (epoch ms, strictly increasing per device). Last writer wins. */
+  updatedAt?: number;
+  /** 1 = changed locally and not yet uploaded. Numeric so Dexie can index it. */
+  dirty?: 0 | 1;
+}
+
+export interface Deck extends SyncFields {
   id: string;
   name: string;
   /** Epoch ms of the most recent import into this deck. */
@@ -44,9 +55,14 @@ export interface Deck {
   level?: HskLevel;
   /** Number of non-deleted cards. Denormalised for cheap list rendering. */
   cardCount: number;
+  /**
+   * 1 = deleted. A tombstone rather than a real delete, so the deletion
+   * reaches other devices instead of the deck resurrecting from the cloud.
+   */
+  deleted?: 0 | 1;
 }
 
-export interface Card {
+export interface Card extends SyncFields {
   /** Stable hash of (hanzi + spanish) — survives re-imports. */
   id: string;
   deckId: string;
@@ -63,7 +79,7 @@ export interface Card {
   updatedAt: number;
 }
 
-export interface Review {
+export interface Review extends SyncFields {
   cardId: string;
   mode: Mode;
   stability: number;
@@ -80,8 +96,12 @@ export interface Review {
   leech: 0 | 1;
 }
 
-export interface LogEntry {
-  id?: number;
+export interface LogEntry extends SyncFields {
+  /**
+   * Random UUID. Was an auto-increment number before sync: those collide
+   * between devices (both have a log #1), UUIDs don't.
+   */
+  id: string;
   cardId: string;
   mode: Mode;
   grade: Grade;
@@ -99,7 +119,13 @@ export interface LogEntry {
   prevState: ReviewState;
 }
 
-export interface SettingRow {
+export interface SettingRow extends SyncFields {
+  key: string;
+  value: unknown;
+}
+
+/** Local-only sync bookkeeping (cursors, account). Never uploaded. */
+export interface SyncStateRow {
   key: string;
   value: unknown;
 }

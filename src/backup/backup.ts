@@ -1,8 +1,11 @@
 import { classifyKind } from '../import/classify.ts';
-import { deckIdFromName, stableCardId } from '../core/hash.ts';
+import { contentLogId, deckIdFromName, stableCardId } from '../core/hash.ts';
 import { normalizeSpace } from '../core/text.ts';
-import { db } from '../db/db.ts';
-import type { Card, Deck, Grade, LogEntry, Review, ReviewState } from '../db/types.ts';
+import { db, SYNCED_SETTING_KEYS } from '../db/db.ts';
+import { setWriteMode } from '../db/tracking.ts';
+import type { Card, Deck, Grade, LogEntry, Review, ReviewState, SettingRow } from '../db/types.ts';
+import { mergeRows, recountDecks, type MergeCount } from '../sync/apply.ts';
+import { forExport } from '../sync/merge.ts';
 
 /**
  * Full-database backup and restore, plus a one-way migrator for the old
@@ -10,17 +13,22 @@ import type { Card, Deck, Grade, LogEntry, Review, ReviewState } from '../db/typ
  */
 
 export const NATIVE_APP_ID = 'mandarin-estudio';
-export const NATIVE_SCHEMA = 1;
+/**
+ * 2 = sync-ready: rows carry `updatedAt`, logs have string ids.
+ * Schema 1 files (pre-sync) are still accepted and upgraded on import.
+ */
+export const NATIVE_SCHEMA = 2;
 
 export interface NativeBackup {
   app: typeof NATIVE_APP_ID;
-  schema: typeof NATIVE_SCHEMA;
+  schema: number;
   exportedAt: string;
   decks: Deck[];
   cards: Card[];
   reviews: Review[];
-  logs: LogEntry[];
-  settings: Array<{ key: string; value: unknown }>;
+  /** Schema 1 files have numeric ids here. */
+  logs: Array<Omit<LogEntry, 'id'> & { id?: string | number }>;
+  settings: SettingRow[];
 }
 
 export async function exportAll(): Promise<NativeBackup> {
@@ -28,18 +36,18 @@ export async function exportAll(): Promise<NativeBackup> {
     db.decks.toArray(),
     db.cards.toArray(),
     db.reviews.toArray(),
-    db.logs.toArray(),
+    db.reviewLogs.toArray(),
     db.settings.toArray(),
   ]);
   return {
     app: NATIVE_APP_ID,
     schema: NATIVE_SCHEMA,
     exportedAt: new Date().toISOString(),
-    decks,
-    cards,
-    reviews,
-    logs,
-    settings,
+    decks: decks.map(forExport),
+    cards: cards.map(forExport),
+    reviews: reviews.map(forExport),
+    logs: logs.map(forExport),
+    settings: settings.map(forExport),
   };
 }
 
@@ -54,44 +62,63 @@ export function detectFormat(data: unknown): BackupFormat {
 }
 
 export interface RestoreSummary {
-  decks: number;
-  cards: number;
-  reviews: number;
-  logs: number;
+  decks: MergeCount;
+  cards: MergeCount;
+  reviews: MergeCount;
+  logs: MergeCount;
 }
 
 /**
- * Restore a native backup. Replace semantics: the backup is a full snapshot,
- * so current contents are wiped inside the same transaction.
+ * Import a native backup by MERGING it into what is already here.
+ *
+ * Replace-all was the original behaviour, but with several devices it would
+ * silently destroy whatever was studied since the backup was made. Merging
+ * uses the same rules as cloud sync: per row, the newer version wins; review
+ * history is the union of both. Importing the same file twice changes nothing.
  */
 export async function importNative(backup: NativeBackup): Promise<RestoreSummary> {
   if (backup.app !== NATIVE_APP_ID) throw new Error('No es una copia de esta aplicación.');
-  if (backup.schema !== NATIVE_SCHEMA) {
-    throw new Error(`Esquema ${String(backup.schema)} no compatible (se esperaba ${NATIVE_SCHEMA}).`);
+  if (backup.schema !== 1 && backup.schema !== 2) {
+    throw new Error(`Esquema ${String(backup.schema)} no compatible: actualiza la aplicación.`);
   }
-  const logs = (backup.logs ?? []).map(({ id: _id, ...rest }) => rest as LogEntry);
 
-  await db.transaction('rw', [db.decks, db.cards, db.reviews, db.logs, db.settings], async () => {
-    await Promise.all([
-      db.decks.clear(),
-      db.cards.clear(),
-      db.reviews.clear(),
-      db.logs.clear(),
-      db.settings.clear(),
-    ]);
-    await db.decks.bulkAdd(backup.decks ?? []);
-    await db.cards.bulkAdd(backup.cards ?? []);
-    await db.reviews.bulkAdd(backup.reviews ?? []);
-    await db.logs.bulkAdd(logs);
-    await db.settings.bulkAdd(backup.settings ?? []);
-  });
+  // Bring schema-1 rows up to date. Missing timestamps fall back to each row's
+  // natural "last changed" time, so an old backup never outranks newer data.
+  const decks: Deck[] = (backup.decks ?? []).map((deck) => ({
+    ...deck,
+    deleted: deck.deleted ?? 0,
+    updatedAt: deck.updatedAt ?? deck.importedAt ?? 0,
+  }));
+  const cards: Card[] = (backup.cards ?? []).map((card) => ({ ...card, updatedAt: card.updatedAt ?? 0 }));
+  const reviews: Review[] = (backup.reviews ?? []).map((review) => ({
+    ...review,
+    updatedAt: review.updatedAt ?? review.lastReview ?? 0,
+  }));
+  const logs: LogEntry[] = (backup.logs ?? []).map((log) => ({
+    ...log,
+    id: typeof log.id === 'string' ? log.id : contentLogId(log.cardId, log.mode, log.reviewedAt, log.grade),
+    updatedAt: log.updatedAt ?? log.reviewedAt,
+  }));
+  const settings: SettingRow[] = (backup.settings ?? [])
+    .filter((row) => SYNCED_SETTING_KEYS.includes(row.key))
+    .map((row) => ({ ...row, updatedAt: row.updatedAt ?? 0 }));
 
-  return {
-    decks: backup.decks?.length ?? 0,
-    cards: backup.cards?.length ?? 0,
-    reviews: backup.reviews?.length ?? 0,
-    logs: logs.length,
-  };
+  return db.transaction(
+    'rw',
+    [db.decks, db.cards, db.reviews, db.reviewLogs, db.settings],
+    async (tx) => {
+      setWriteMode(tx, 'preserve');
+      const summary: RestoreSummary = {
+        decks: await mergeRows(db.decks, 'decks', decks, (d) => d.id),
+        cards: await mergeRows(db.cards, 'cards', cards, (c) => c.id),
+        reviews: await mergeRows(db.reviews, 'reviews', reviews, (r) => [r.cardId, r.mode] as [string, string]),
+        logs: await mergeRows(db.reviewLogs, 'logs', logs, (l) => l.id),
+      };
+      await mergeRows(db.settings, 'settings', settings, (s) => s.key);
+      await recountDecks();
+      return summary;
+    },
+  );
 }
 
 // ------------------------------------------------------------ legacy (v2) ---
@@ -209,7 +236,12 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
     else byHanzi.set(key, [entry]);
   }
 
-  await db.transaction('rw', [db.decks, db.cards, db.reviews, db.logs], async () => {
+  await db.transaction('rw', [db.decks, db.cards, db.reviews, db.reviewLogs], async (tx) => {
+    // Rows carry their historical timestamps (a review's updatedAt is its last
+    // review), so old prototype data never outranks newer study synced from
+    // another device.
+    setWriteMode(tx, 'preserve');
+
     // Decks: create the old ones that don't exist yet (by name).
     const existingDecks = await db.decks.toArray();
     const deckIdByName = new Map(
@@ -218,12 +250,16 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
     const oldDeckNames = [...new Set((backup.cards ?? []).map((c) => normalizeSpace(c.deck ?? 'General')))];
     for (const name of oldDeckNames) {
       const key = name.toLowerCase();
-      if (!deckIdByName.has(key)) {
-        const deck: Deck = { id: deckIdFromName(name), name, importedAt: now, cardCount: 0 };
-        await db.decks.add(deck);
-        deckIdByName.set(key, deck.id);
-        summary.decks++;
+      const existing = existingDecks.find((d) => normalizeSpace(d.name).toLowerCase() === key);
+      if (existing) {
+        // A deck deleted earlier comes back when its cards are imported again.
+        if (existing.deleted === 1) await db.decks.update(existing.id, { deleted: 0, updatedAt: now });
+        continue;
       }
+      const deck: Deck = { id: deckIdFromName(name), name, importedAt: now, cardCount: 0, deleted: 0, updatedAt: now };
+      await db.decks.add(deck);
+      deckIdByName.set(key, deck.id);
+      summary.decks++;
     }
 
     // Cards + review rows.
@@ -235,6 +271,7 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
       const existing = await db.cards.get(newId);
       if (existing) {
         summary.cardsExisting++;
+        if (existing.deleted === 1) await db.cards.update(newId, { deleted: 0, updatedAt: now });
       } else {
         const deckKey = normalizeSpace(legacy.deck ?? 'General').toLowerCase();
         const card: Card = {
@@ -247,7 +284,7 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
           deleted: 0,
           suspended: 0,
           createdAt: parseMs(legacy.createdAt) ?? now,
-          updatedAt: now,
+          updatedAt: parseMs(legacy.createdAt) ?? now,
         };
         await db.cards.add(card);
         summary.cardsCreated++;
@@ -264,18 +301,20 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
       }
 
       const lapses = fsrs.lapses ?? 0;
+      const lastReview = parseMs(fsrs.last_review);
       const review: Review = {
         cardId: newId,
         mode: 'recognition',
         stability: Math.max(0.1, fsrs.stability ?? 0.1),
         difficulty: Math.min(10, Math.max(1, fsrs.difficulty ?? 5)),
         due: parseMs(fsrs.due) ?? now,
-        lastReview: parseMs(fsrs.last_review),
+        lastReview,
         state,
         lapses,
         reps: fsrs.reps ?? 0,
         step: 0,
         leech: lapses >= 8 ? 1 : 0,
+        updatedAt: lastReview ?? now,
       };
       await db.reviews.add(review);
       summary.reviewsImported++;
@@ -299,18 +338,22 @@ export async function importLegacy(backup: LegacyBackup): Promise<LegacySummary>
       }
       const sameDeck = candidates.find((c) => c.deck === legacy.deck);
       const target = sameDeck ?? candidates[0];
+      const cardId = (target as { newId: string }).newId;
       const grade = Math.min(4, Math.max(1, legacy.rating ?? 3)) as Grade;
       logs.push({
-        cardId: (target as { newId: string }).newId,
+        // Content-derived id: importing the same backup twice is a no-op.
+        id: contentLogId(cardId, 'recognition', legacy.ts, grade),
+        cardId,
         mode: 'recognition',
         grade,
         reviewedAt: legacy.ts,
         elapsedMs: 0,
         prevState: LEGACY_STATE[legacy.prev ?? 0] ?? 'new',
+        updatedAt: legacy.ts,
       });
     }
-    if (logs.length > 0) await db.logs.bulkAdd(logs);
-    summary.logsImported = logs.length;
+    const merged = await mergeRows(db.reviewLogs, 'logs', logs, (l) => l.id);
+    summary.logsImported = merged.added;
   });
 
   return summary;

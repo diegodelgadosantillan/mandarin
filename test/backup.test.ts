@@ -9,7 +9,7 @@ import {
 } from '../src/backup/backup.ts';
 import { stableCardId } from '../src/core/hash.ts';
 import { db } from '../src/db/db.ts';
-import { commitImport } from '../src/import/reconcile.ts';
+import { commitImport, deleteDeck } from '../src/import/reconcile.ts';
 import { DAY_MS } from '../src/scheduler/fsrs.ts';
 
 const NOW = Date.now();
@@ -93,7 +93,7 @@ beforeEach(async () => {
     db.decks.clear(),
     db.cards.clear(),
     db.reviews.clear(),
-    db.logs.clear(),
+    db.reviewLogs.clear(),
     db.settings.clear(),
   ]);
 });
@@ -140,7 +140,7 @@ describe('importLegacy into an empty database', () => {
   it('matches General-deck logs to the real card by hanzi', async () => {
     await importLegacy(LEGACY);
     const appleId = stableCardId('苹果', 'manzana');
-    const logs = await db.logs.where('cardId').equals(appleId).toArray();
+    const logs = await db.reviewLogs.where('cardId').equals(appleId).toArray();
     expect(logs).toHaveLength(2);
     expect(logs.map((l) => l.prevState).sort()).toEqual(['new', 'review']);
     expect(logs.every((l) => l.elapsedMs === 0 && l.mode === 'recognition')).toBe(true);
@@ -199,42 +199,109 @@ describe('importLegacy merging with existing data', () => {
     expect(review?.stability).toBe(3); // untouched
   });
 
-  it('is idempotent: importing the same backup twice adds nothing new except logs', async () => {
+  it('is idempotent: importing the same backup twice adds nothing, not even logs', async () => {
     await importLegacy(LEGACY);
     const summary = await importLegacy(LEGACY);
     expect(summary.cardsCreated).toBe(0);
     expect(summary.cardsExisting).toBe(4);
     expect(summary.reviewsImported).toBe(0);
     expect(summary.reviewsSkippedExisting).toBe(3);
+    expect(summary.logsImported).toBe(0);
     expect(await db.cards.count()).toBe(4);
-    // Logs intentionally re-append (no stable identity to dedupe on).
-    expect(await db.logs.count()).toBe(6);
+    // Content-derived log ids make a second import a no-op.
+    expect(await db.reviewLogs.count()).toBe(3);
+  });
+
+  it('keeps historical timestamps so old data never outranks newer study', async () => {
+    await importLegacy(LEGACY);
+    const review = await db.reviews.get([stableCardId('苹果', 'manzana'), 'recognition']);
+    expect(review?.updatedAt).toBe(review?.lastReview);
+    expect(review?.dirty).toBe(1);
   });
 });
 
-describe('native export/import round trip', () => {
-  it('restores an identical database', async () => {
+describe('native backup: merge import', () => {
+  async function wipe(): Promise<void> {
+    await Promise.all([db.decks.clear(), db.cards.clear(), db.reviews.clear(), db.reviewLogs.clear(), db.settings.clear()]);
+  }
+
+  it('restores everything onto an empty database', async () => {
     await importLegacy(LEGACY);
     await db.settings.put({ key: 'settings', value: { newPerDay: 7 } });
-
     const backup = await exportAll();
     expect(detectFormat(backup)).toBe('native');
+    expect(backup.schema).toBe(2);
 
-    // Simulate a browser wipe plus some junk that must disappear.
-    await Promise.all([db.decks.clear(), db.cards.clear(), db.reviews.clear(), db.logs.clear(), db.settings.clear()]);
-    await commitImport('Basura', undefined, [
-      { hanzi: '垃圾', pinyin: 'lājī', spanish: 'basura', kind: 'word' },
-    ]);
-
+    await wipe();
     const summary = await importNative(backup);
-    expect(summary).toEqual({ decks: 2, cards: 4, reviews: 3, logs: 3 });
+    expect(summary.decks.added).toBe(2);
+    expect(summary.cards.added).toBe(4);
+    expect(summary.reviews.added).toBe(3);
+    expect(summary.logs.added).toBe(3);
 
-    expect(await db.cards.count()).toBe(4);
-    expect(await db.cards.get(stableCardId('垃圾', 'basura'))).toBeUndefined();
     const review = await db.reviews.get([stableCardId('苹果', 'manzana'), 'recognition']);
     expect(review?.stability).toBe(42.5);
-    const settings = await db.settings.get('settings');
-    expect(settings?.value).toEqual({ newPerDay: 7 });
+    expect((await db.settings.get('settings'))?.value).toEqual({ newPerDay: 7 });
+  });
+
+  it('never deletes what this device has and the backup lacks', async () => {
+    await importLegacy(LEGACY);
+    const backup = await exportAll();
+    await commitImport('Extra', undefined, [{ hanzi: '垃圾', pinyin: 'lājī', spanish: 'basura', kind: 'word' }]);
+
+    await importNative(backup);
+    expect(await db.cards.get(stableCardId('垃圾', 'basura'))).toBeDefined();
+    expect(await db.cards.count()).toBe(5);
+  });
+
+  it('keeps the newer side of each review in both directions', async () => {
+    await importLegacy(LEGACY);
+    const appleKey: [string, string] = [stableCardId('苹果', 'manzana'), 'recognition'];
+    const waterKey: [string, string] = [stableCardId('难', 'difícil'), 'recognition'];
+    const backup = await exportAll();
+
+    // After the backup: study 苹果 here (local becomes newer).
+    await db.reviews.update(appleKey, { stability: 99 });
+    // ...and make the backup's copy of 难 newer than what is here.
+    const hard = backup.reviews.find((r) => r.cardId === waterKey[0])!;
+    hard.stability = 77;
+    hard.updatedAt = Date.now() + 60_000;
+
+    await importNative(backup);
+    expect((await db.reviews.get(appleKey))?.stability).toBe(99);
+    expect((await db.reviews.get(waterKey))?.stability).toBe(77);
+  });
+
+  it('importing the same file twice changes nothing the second time', async () => {
+    await importLegacy(LEGACY);
+    const backup = await exportAll();
+    await importNative(backup);
+    const second = await importNative(backup);
+    for (const part of [second.decks, second.cards, second.reviews, second.logs]) {
+      expect(part).toEqual({ added: 0, updated: 0 });
+    }
+    expect(await db.reviewLogs.count()).toBe(3);
+  });
+
+  it('accepts schema 1 files: numeric log ids, no timestamps', async () => {
+    await importLegacy(LEGACY);
+    const v2 = await exportAll();
+    // Rebuild the file as the pre-sync app would have written it.
+    const v1 = {
+      ...v2,
+      schema: 1,
+      decks: v2.decks.map(({ updatedAt: _u, deleted: _d, ...d }) => d),
+      reviews: v2.reviews.map(({ updatedAt: _u, ...r }) => r),
+      logs: v2.logs.map(({ id: _id, updatedAt: _u, ...l }, i) => ({ ...l, id: i + 1 })),
+    };
+
+    await wipe();
+    const first = await importNative(v1 as never);
+    expect(first.logs.added).toBe(3);
+    // Same history again (e.g. the same old file) must not duplicate logs.
+    const again = await importNative(v1 as never);
+    expect(again.logs.added).toBe(0);
+    expect(await db.reviewLogs.count()).toBe(3);
   });
 
   it('rejects foreign or future-schema files', async () => {
@@ -242,5 +309,37 @@ describe('native export/import round trip', () => {
     await expect(
       importNative({ app: 'mandarin-estudio', schema: 99, cards: [], decks: [], reviews: [], logs: [], settings: [], exportedAt: '' } as never),
     ).rejects.toThrow(/99/);
+  });
+});
+
+describe('deleteDeck', () => {
+  it('tombstones the deck and its cards instead of removing rows', async () => {
+    await importLegacy(LEGACY);
+    const deck = (await db.decks.toArray()).find((d) => d.name === 'HSK1_vocabulario')!;
+
+    const hidden = await deleteDeck(deck.id);
+    expect(hidden).toBe(3);
+    expect(await db.decks.get(deck.id)).toMatchObject({ deleted: 1, cardCount: 0, dirty: 1 });
+    const cards = await db.cards.where('deckId').equals(deck.id).toArray();
+    expect(cards.every((c) => c.deleted === 1 && c.dirty === 1)).toBe(true);
+    // Scheduling history survives for a later re-import.
+    expect(await db.reviews.get([stableCardId('苹果', 'manzana'), 'recognition'])).toBeDefined();
+  });
+
+  it('re-importing the same deck brings it back with its history', async () => {
+    await commitImport('Frutas', 1, [{ hanzi: '苹果', pinyin: 'píngguǒ', spanish: 'manzana', kind: 'word' }]);
+    const deck = (await db.decks.toArray())[0]!;
+    const appleId = stableCardId('苹果', 'manzana');
+    await db.reviews.put({
+      cardId: appleId, mode: 'recognition', stability: 30, difficulty: 4, due: NOW + 30 * DAY_MS,
+      lastReview: NOW, state: 'review', lapses: 0, reps: 5, step: 0, leech: 0,
+    });
+
+    await deleteDeck(deck.id);
+    const result = await commitImport('Frutas', 1, [{ hanzi: '苹果', pinyin: 'píngguǒ', spanish: 'manzana', kind: 'word' }]);
+
+    expect(result.restored).toBe(1);
+    expect((await db.decks.get(deck.id))?.deleted).toBe(0);
+    expect((await db.reviews.get([appleId, 'recognition']))?.stability).toBe(30);
   });
 });

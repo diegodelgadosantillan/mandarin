@@ -30,12 +30,13 @@ async function findOrCreateDeck(name: string, level: HskLevel | undefined, now: 
   const key = target.toLowerCase();
   const existing = (await db.decks.toArray()).find((d) => normalizeSpace(d.name).toLowerCase() === key);
   if (existing) {
-    const updated: Deck = { ...existing, name: target, importedAt: now };
+    // Re-importing a deleted deck brings it back, history included.
+    const updated: Deck = { ...existing, name: target, importedAt: now, deleted: 0 };
     if (level === undefined) delete updated.level;
     else updated.level = level;
     return updated;
   }
-  const created: Deck = { id: deckIdFromName(target), name: target, importedAt: now, cardCount: 0 };
+  const created: Deck = { id: deckIdFromName(target), name: target, importedAt: now, cardCount: 0, deleted: 0 };
   if (level !== undefined) created.level = level;
   return created;
 }
@@ -165,14 +166,20 @@ export async function commitImport(
   });
 }
 
-/** Remove a deck and its cards + scheduling state. Review logs are kept so statistics stay honest. */
+/**
+ * Delete a deck by tombstoning it and its cards rather than removing rows.
+ *
+ * A real delete can't be synced: the next pull would bring the rows straight
+ * back from another device. Tombstones travel like any other change. Review
+ * state and logs are kept, so re-importing the same file restores the deck
+ * with its history; statistics stay honest either way.
+ *
+ * Returns the number of cards hidden.
+ */
 export async function deleteDeck(deckId: string): Promise<number> {
-  return db.transaction('rw', db.decks, db.cards, db.reviews, async () => {
-    const cards = await db.cards.where('deckId').equals(deckId).toArray();
-    const ids = cards.map((c) => c.id);
-    for (const id of ids) await db.reviews.where('cardId').equals(id).delete();
-    await db.cards.bulkDelete(ids);
-    await db.decks.delete(deckId);
-    return ids.length;
+  return db.transaction('rw', db.decks, db.cards, async () => {
+    const hidden = await db.cards.where('[deckId+deleted]').equals([deckId, 0]).modify({ deleted: 1 });
+    await db.decks.update(deckId, { deleted: 1, cardCount: 0 });
+    return hidden;
   });
 }

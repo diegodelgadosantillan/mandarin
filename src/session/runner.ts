@@ -1,4 +1,5 @@
 import { db } from '../db/db.ts';
+import { newId } from '../db/tracking.ts';
 import type { Card, Grade, LogEntry, Mode, Review } from '../db/types.ts';
 import { Fsrs, MINUTE_MS, NEW_CARD_STATE, type CardState, type Scheduled } from '../scheduler/fsrs.ts';
 import type { AppSettings } from '../settings.ts';
@@ -131,6 +132,7 @@ export class SessionRunner {
     };
 
     const log: LogEntry = {
+      id: newId(),
       cardId: item.card.id,
       mode: this.mode,
       grade,
@@ -139,9 +141,9 @@ export class SessionRunner {
       prevState: previous.state,
     };
 
-    await db.transaction('rw', db.reviews, db.logs, async () => {
+    await db.transaction('rw', db.reviews, db.reviewLogs, async () => {
       await db.reviews.put(review);
-      await db.logs.add(log);
+      await db.reviewLogs.add(log);
     });
 
     this.answered++;

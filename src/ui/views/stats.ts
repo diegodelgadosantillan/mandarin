@@ -33,7 +33,7 @@ export async function renderStats(root: HTMLElement): Promise<void> {
   const [cards, reviews, logs] = await Promise.all([
     db.cards.toArray(),
     db.reviews.toArray(),
-    db.logs.where('reviewedAt').above(logsSince).toArray(),
+    db.reviewLogs.where('reviewedAt').above(logsSince).toArray(),
   ]);
 
   root.append(

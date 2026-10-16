@@ -15,8 +15,11 @@ const NOW = new Date(2026, 6, 28, 12, 0).getTime(); // local noon
 const DAY_START = 4;
 const TODAY = new Date(2026, 6, 28, DAY_START).getTime();
 
+let logSeq = 0;
+
 function log(overrides: Partial<LogEntry>): LogEntry {
   return {
+    id: `log-${logSeq++}`,
     cardId: 'c1',
     mode: 'recognition',
     grade: 3,

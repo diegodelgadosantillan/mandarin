@@ -104,14 +104,17 @@ function renderBackupSection(): HTMLElement {
         if (format === 'native') {
           const backup = data as NativeBackup;
           const ok = confirm(
-            `Restaurar la copia del ${new Date(backup.exportedAt).toLocaleDateString('es-ES')}:\n` +
+            `Importar la copia del ${new Date(backup.exportedAt).toLocaleDateString('es-ES')}:\n` +
               `${backup.cards?.length ?? 0} tarjetas, ${backup.reviews?.length ?? 0} programaciones, ${backup.logs?.length ?? 0} repasos.\n\n` +
-              'REEMPLAZA todos los datos actuales. ¿Continuar?',
+              'Se COMBINA con lo que ya tienes: en cada tarjeta gana la versión más reciente y no se borra nada. ¿Continuar?',
           );
           if (!ok) return;
           const summary = await importNative(backup);
-          status.textContent = `Restaurado: ${summary.cards} tarjetas, ${summary.reviews} programaciones, ${summary.logs} repasos.`;
-          toast('Copia restaurada. Recargando…');
+          const changed = (part: { added: number; updated: number }): number => part.added + part.updated;
+          status.textContent =
+            `Combinado: ${changed(summary.cards)} tarjetas, ${changed(summary.reviews)} programaciones y ` +
+            `${summary.logs.added} repasos nuevos o más recientes. El resto ya estaba al día.`;
+          toast('Copia importada. Recargando…');
           setTimeout(() => window.location.reload(), 1200);
           return;
         }
@@ -168,7 +171,7 @@ function renderBackupSection(): HTMLElement {
     h(
       'p',
       { class: 'deck__meta', style: 'margin-top:8px' },
-      'Acepta copias de esta aplicación (restauración completa) y copias del prototipo anterior (se añaden sin duplicar).',
+      'Acepta copias de esta aplicación y del prototipo anterior. Importar nunca borra: se combina con lo que ya tienes y en cada tarjeta gana la versión más reciente.',
     ),
     status,
     persistence,

@@ -48,7 +48,7 @@ export async function countToday(
   dayStartHour: number,
 ): Promise<{ reviews: number; introduced: number }> {
   const from = startOfStudyDay(now, dayStartHour);
-  const logs = await db.logs
+  const logs = await db.reviewLogs
     .where('[mode+reviewedAt]')
     .between([mode, from], [mode, Number.MAX_SAFE_INTEGER])
     .toArray();

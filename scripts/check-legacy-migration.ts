@@ -43,7 +43,7 @@ console.log(`leeches: ${leeches}`);
 const due = reviews.filter((r) => r.due <= Date.now()).length;
 console.log(`due now (recognition): ${due}`);
 
-const logs = await db.logs.count();
+const logs = await db.reviewLogs.count();
 console.log(`logs: ${logs}`);
 
 // Sample a mature card to eyeball values.

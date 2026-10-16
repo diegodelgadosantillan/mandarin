@@ -30,7 +30,7 @@ const settings: AppSettings = { ...DEFAULT_SETTINGS };
 beforeEach(async () => {
   await db.cards.clear();
   await db.reviews.clear();
-  await db.logs.clear();
+  await db.reviewLogs.clear();
   await db.settings.clear();
 });
 
@@ -90,8 +90,9 @@ describe('buildQueue', () => {
     const cards = Array.from({ length: 30 }, (_, i) => makeCard(`c${String(i).padStart(2, '0')}`));
     await db.cards.bulkPut(cards);
     // 15 first-reviews already logged today.
-    await db.logs.bulkAdd(
+    await db.reviewLogs.bulkAdd(
       Array.from({ length: 15 }, (_, i) => ({
+        id: `log-${i}`,
         cardId: `c${String(i).padStart(2, '0')}`,
         mode: 'recognition' as const,
         grade: 3 as const,
@@ -213,7 +214,7 @@ describe('SessionRunner', () => {
     expect(review?.state).toBe('learning');
     expect(review?.reps).toBe(1);
 
-    const logs = await db.logs.toArray();
+    const logs = await db.reviewLogs.toArray();
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({
       cardId: 'a',
@@ -315,7 +316,7 @@ describe('SessionRunner', () => {
     expect(preview[4].intervalMs).toBeGreaterThan(DAY_MS);
 
     expect(await db.reviews.count()).toBe(0);
-    expect(await db.logs.count()).toBe(0);
+    expect(await db.reviewLogs.count()).toBe(0);
   });
 });
 
