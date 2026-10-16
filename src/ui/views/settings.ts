@@ -8,6 +8,8 @@ import {
 } from '../../backup/backup.ts';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type AppSettings } from '../../settings.ts';
 import { clear, h, toast } from '../dom.ts';
+import { saveFile } from '../save-file.ts';
+import { isPersisted } from '../../core/storage.ts';
 
 interface NumberFieldSpec {
   key: keyof AppSettings;
@@ -52,6 +54,16 @@ const FIELDS: NumberFieldSpec[] = [
 function renderBackupSection(): HTMLElement {
   const status = h('p', { class: 'deck__meta', 'aria-live': 'polite' });
 
+  const persistence = h('p', { class: 'deck__meta' });
+  void isPersisted().then((persisted) => {
+    if (persisted === true) {
+      persistence.textContent = '🔒 Almacenamiento protegido: el navegador no borrará tus datos por falta de espacio o de uso.';
+    } else if (persisted === false) {
+      persistence.textContent =
+        '⚠️ Almacenamiento no protegido: el navegador podría borrar los datos si no abres la app en un tiempo. Instalarla (o activar la sincronización) lo evita.';
+    }
+  });
+
   const exportButton = h(
     'button',
     {
@@ -62,14 +74,11 @@ function renderBackupSection(): HTMLElement {
         try {
           const backup = await exportAll();
           const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
           const date = new Date().toISOString().slice(0, 10);
-          const link = h('a', { href: url, download: `mandarin-estudio-${date}.json` });
-          document.body.append(link);
-          link.click();
-          link.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 5000);
-          status.textContent = `Copia exportada: ${backup.cards.length} tarjetas, ${backup.logs.length} repasos registrados.`;
+          const outcome = await saveFile(blob, `mandarin-estudio-${date}.json`);
+          if (outcome !== 'cancelled') {
+            status.textContent = `Copia exportada: ${backup.cards.length} tarjetas, ${backup.logs.length} repasos registrados.`;
+          }
         } finally {
           exportButton.disabled = false;
         }
@@ -80,7 +89,7 @@ function renderBackupSection(): HTMLElement {
 
   const fileInput = h('input', {
     type: 'file',
-    accept: '.json,application/json',
+    accept: '.json,application/json,text/plain',
     class: 'visually-hidden',
     id: 'backup-file',
     onchange: async (event: Event) => {
@@ -162,6 +171,7 @@ function renderBackupSection(): HTMLElement {
       'Acepta copias de esta aplicación (restauración completa) y copias del prototipo anterior (se añaden sin duplicar).',
     ),
     status,
+    persistence,
   );
 }
 

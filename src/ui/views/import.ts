@@ -37,7 +37,22 @@ export function renderImport(root: HTMLElement): void {
   const input = h('input', {
     type: 'file',
     multiple: true,
-    accept: '.xlsx,.xls,.xlsm,.csv,.tsv,.txt',
+    // Extensions plus MIME types: iOS's Files picker greys out files that only
+    // match by extension.
+    accept: [
+      '.xlsx',
+      '.xls',
+      '.xlsm',
+      '.csv',
+      '.tsv',
+      '.txt',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'application/vnd.ms-excel.sheet.macroEnabled.12',
+      'text/csv',
+      'text/tab-separated-values',
+      'text/plain',
+    ].join(','),
     class: 'visually-hidden',
     id: 'file-input',
     onchange: (event: Event) => {

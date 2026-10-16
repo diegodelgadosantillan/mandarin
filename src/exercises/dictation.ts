@@ -1,6 +1,6 @@
 import {
-  browserName,
   getSpeechRate,
+  noVoiceMessage,
   setSpeechRate,
   speak,
   speechAvailable,
@@ -23,10 +23,7 @@ export const dictationExercise: ExerciseModule = {
 
   availability() {
     if (speechAvailable()) return { available: true };
-    return {
-      available: false,
-      reason: `${browserName()} no tiene ninguna voz china instalada, así que no puede reproducir el audio del dictado. Prueba con Chrome o Edge.`,
-    };
+    return { available: false, reason: noVoiceMessage() };
   },
 
   create(card, host) {

@@ -11,10 +11,16 @@
  *   degrade loudly, not silently.
  * - iOS Safari blocks speech until a user gesture: automatic playback is gated
  *   behind the first *manual* play of the session.
+ * - Safari frequently never fires `voiceschanged`, so a missing voice is never
+ *   cached as final: every init call re-reads getVoices() until one appears.
+ * - WebKit silently drops an utterance queued in the same tick as cancel(),
+ *   so speaking after a cancel is deferred briefly.
  */
 
+import { isIOS, isMac } from '../core/platform.ts';
+
 let cachedVoice: SpeechSynthesisVoice | null = null;
-let initialized = false;
+let listening = false;
 /** True once the user has triggered speech by hand this session. */
 let userUnlocked = false;
 let rate = 0.9;
@@ -70,18 +76,24 @@ export function pickChineseVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesi
   return bestScore < 0 ? null : best;
 }
 
-/** Load voices and cache the preferred Chinese one. Safe to call repeatedly. */
+/**
+ * Load voices and cache the preferred Chinese one. Safe to call repeatedly:
+ * a found voice is kept, but "no voice" is retried on every call, because on
+ * Safari the list often fills in only after the first attempt has timed out.
+ */
 export async function initSpeech(initialRate: number): Promise<boolean> {
   rate = clampRate(initialRate);
-  if (initialized) return cachedVoice !== null;
-  const voices = await waitForVoices();
-  cachedVoice = pickChineseVoice(voices);
-  initialized = true;
+  if (cachedVoice) return true;
 
-  // Some engines populate voices late; upgrade if a Chinese voice appears.
-  synth()?.addEventListener('voiceschanged', () => {
-    if (!cachedVoice) cachedVoice = pickChineseVoice(synth()?.getVoices() ?? []);
-  });
+  cachedVoice = pickChineseVoice(await waitForVoices());
+
+  if (!listening) {
+    listening = true;
+    // Engines that do fire the event late get upgraded as soon as they do.
+    synth()?.addEventListener('voiceschanged', () => {
+      if (!cachedVoice) cachedVoice = pickChineseVoice(synth()?.getVoices() ?? []);
+    });
+  }
   return cachedVoice !== null;
 }
 
@@ -125,12 +137,17 @@ export function speak(text: string, options: SpeakOptions = {}): void {
   if (options.auto && !userUnlocked) return;
   if (!options.auto) userUnlocked = true;
 
-  synthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.voice = cachedVoice;
   utterance.lang = cachedVoice.lang;
   utterance.rate = rate;
-  synthesis.speak(utterance);
+
+  // Interrupt whatever is playing, then speak on the next task: WebKit drops an
+  // utterance queued in the same tick as cancel().
+  const busy = synthesis.speaking || synthesis.pending;
+  synthesis.cancel();
+  if (busy) setTimeout(() => synthesis.speak(utterance), 60);
+  else synthesis.speak(utterance);
 }
 
 export function stopSpeech(): void {
@@ -140,9 +157,25 @@ export function stopSpeech(): void {
 /** Browser name for the "no Chinese voice" message. */
 export function browserName(): string {
   const ua = navigator.userAgent;
-  if (/firefox/i.test(ua)) return 'Firefox';
-  if (/edg\//i.test(ua)) return 'Edge';
+  if (/firefox|fxios/i.test(ua)) return 'Firefox';
+  if (/edg\/|edgios/i.test(ua)) return 'Edge';
   if (/chrome|crios/i.test(ua)) return 'Chrome';
   if (/safari/i.test(ua)) return 'Safari';
   return 'tu navegador';
+}
+
+/**
+ * Why dictation is unavailable and what to do about it, in the user's terms.
+ *
+ * On Apple devices every browser uses the system voices, so "switch browser"
+ * is the wrong advice — the fix is downloading a Chinese voice in Settings.
+ */
+export function noVoiceMessage(): string {
+  if (isIOS()) {
+    return 'Este dispositivo no tiene ninguna voz china instalada. Descárgala en Ajustes → Accesibilidad → Contenido leído → Voces → Chino, y vuelve a abrir la app.';
+  }
+  if (isMac()) {
+    return 'Este Mac no tiene ninguna voz china instalada. Añádela en Ajustes del Sistema → Accesibilidad → Contenido leído → Voz del sistema → Gestionar voces → Chino, y vuelve a abrir la app.';
+  }
+  return `${browserName()} no tiene ninguna voz china instalada, así que no puede reproducir el audio del dictado. Prueba con Chrome o Edge.`;
 }

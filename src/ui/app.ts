@@ -1,4 +1,5 @@
 import { clear, h } from './dom.ts';
+import { renderInstallHint } from './install-hint.ts';
 import { renderDecks } from './views/decks.ts';
 import { renderDifficult } from './views/difficult.ts';
 import { renderImport } from './views/import.ts';
@@ -38,8 +39,10 @@ export function startApp(mount: HTMLElement): void {
         nav,
       ),
     ),
-    view,
   );
+  const hint = renderInstallHint();
+  if (hint) mount.append(hint);
+  mount.append(view);
 
   const links = ROUTES.map((route) => h('a', { href: route.path }, route.label));
   nav.append(...links);
