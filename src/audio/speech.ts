@@ -15,6 +15,15 @@
  *   cached as final: every init call re-reads getVoices() until one appears.
  * - WebKit silently drops an utterance queued in the same tick as cancel(),
  *   so speaking after a cancel is deferred briefly.
+ * - macOS lists its Eloquence novelty voices (Eddy, Flo, Grandma…) before
+ *   Tingting, all as zh-CN. They are ranked below the real voices so a tie
+ *   doesn't hand the learner the worst pronunciation on the machine.
+ * - Chrome on macOS, left open for a long time (or across a sleep), can wedge
+ *   the synthesizer: it sits `paused`, or swallows speak() without ever firing
+ *   `start`. It also drops the voice objects on `voiceschanged`. So every
+ *   speak() re-resolves the voice, resumes the engine, keeps the utterance
+ *   referenced (Chrome garbage-collects it mid-sentence otherwise) and retries
+ *   once if nothing has started after a moment.
  */
 
 import { isIOS, isMac } from '../core/platform.ts';
@@ -24,6 +33,10 @@ let listening = false;
 /** True once the user has triggered speech by hand this session. */
 let userUnlocked = false;
 let rate = 0.9;
+/** The utterance in flight, held so Chrome can't garbage-collect it mid-speech. */
+let current: SpeechSynthesisUtterance | null = null;
+/** How long to wait for `start` before assuming the engine is wedged. */
+const START_TIMEOUT_MS = 1500;
 
 function synth(): SpeechSynthesis | null {
   return 'speechSynthesis' in window ? window.speechSynthesis : null;
@@ -49,10 +62,14 @@ function waitForVoices(timeoutMs = 2000): Promise<SpeechSynthesisVoice[]> {
   });
 }
 
-/** zh-CN / zh-Hans / cmn-Hans first, then any zh-*. Natural (neural) voices win ties. */
+/**
+ * zh-CN / zh-Hans / cmn-Hans first, then any zh-*. Natural (neural) voices win
+ * ties; macOS's Eloquence novelty voices lose them.
+ */
 export function pickChineseVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
   const isSimplified = (lang: string): boolean => /^(zh[-_](CN|Hans)|cmn([-_]Hans)?([-_]CN)?)/i.test(lang);
   const isAnyChinese = (lang: string): boolean => /^(zh|cmn)([-_]|$)/i.test(lang);
+  const isEloquence = (name: string): boolean => /^(Eddy|Flo|Grandma|Grandpa|Reed|Rocko|Sandy|Shelley)\b/i.test(name);
 
   const score = (voice: SpeechSynthesisVoice): number => {
     let s = 0;
@@ -60,6 +77,7 @@ export function pickChineseVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesi
     else if (isAnyChinese(voice.lang)) s += 50;
     else return -1;
     if (/natural|neural/i.test(voice.name)) s += 10;
+    if (isEloquence(voice.name)) s -= 5;
     if (voice.localService) s += 1;
     return s;
   };
@@ -89,9 +107,10 @@ export async function initSpeech(initialRate: number): Promise<boolean> {
 
   if (!listening) {
     listening = true;
-    // Engines that do fire the event late get upgraded as soon as they do.
+    // Engines that fire the event late get upgraded as soon as they do, and
+    // Chrome's replaced voice objects are swapped for the live ones.
     synth()?.addEventListener('voiceschanged', () => {
-      if (!cachedVoice) cachedVoice = pickChineseVoice(synth()?.getVoices() ?? []);
+      cachedVoice = pickChineseVoice(synth()?.getVoices() ?? []) ?? cachedVoice;
     });
   }
   return cachedVoice !== null;
@@ -137,20 +156,64 @@ export function speak(text: string, options: SpeakOptions = {}): void {
   if (options.auto && !userUnlocked) return;
   if (!options.auto) userUnlocked = true;
 
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.voice = cachedVoice;
-  utterance.lang = cachedVoice.lang;
-  utterance.rate = rate;
-
   // Interrupt whatever is playing, then speak on the next task: WebKit drops an
   // utterance queued in the same tick as cancel().
   const busy = synthesis.speaking || synthesis.pending;
   synthesis.cancel();
-  if (busy) setTimeout(() => synthesis.speak(utterance), 60);
-  else synthesis.speak(utterance);
+  if (busy) setTimeout(() => attempt(synthesis, text, true), 60);
+  else attempt(synthesis, text, true);
+}
+
+/** The cached voice as a live object from the current list (Chrome replaces them). */
+function liveVoice(synthesis: SpeechSynthesis): SpeechSynthesisVoice | null {
+  if (!cachedVoice) return null;
+  const uri = cachedVoice.voiceURI;
+  const fresh = synthesis.getVoices().find((v) => v.voiceURI === uri);
+  if (fresh) cachedVoice = fresh;
+  return cachedVoice;
+}
+
+function attempt(synthesis: SpeechSynthesis, text: string, retry: boolean): void {
+  const voice = liveVoice(synthesis);
+  if (!voice) return;
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.voice = voice;
+  utterance.lang = voice.lang;
+  utterance.rate = rate;
+
+  let started = false;
+  const release = (): void => {
+    if (current === utterance) current = null;
+  };
+  utterance.onstart = () => {
+    started = true;
+  };
+  utterance.onend = release;
+  utterance.onerror = release;
+  current = utterance;
+
+  // Unconditional: Chrome can report `paused === false` while actually paused.
+  synthesis.resume();
+  synthesis.speak(utterance);
+
+  if (!retry) return;
+  // A wedged engine accepts the utterance and never starts it: reset it and
+  // try once more. Superseded utterances (the user pressed again) are left alone.
+  setTimeout(() => {
+    if (started || current !== utterance) return;
+    // cancel() fires `error: canceled` on this utterance; don't let it release.
+    utterance.onend = utterance.onerror = null;
+    synthesis.cancel();
+    synthesis.resume();
+    setTimeout(() => {
+      if (current === utterance) attempt(synthesis, text, false);
+    }, 60);
+  }, START_TIMEOUT_MS);
 }
 
 export function stopSpeech(): void {
+  current = null;
   synth()?.cancel();
 }
 
